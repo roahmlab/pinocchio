@@ -7,6 +7,7 @@
 
 #include "pinocchio/algorithm/check.hpp"
 #include "pinocchio/algorithm/kinematics.hpp"
+#include "pinocchio/algorithm/kinematics-derivatives.hpp"
 #include "pinocchio/spatial/skew.hpp"
 #include "pinocchio/spatial/symmetric3.hpp"
 
@@ -373,11 +374,15 @@ namespace pinocchio
       data.liMi[i] = model.jointPlacements[i] * jdata.M();
 
       data.v[i] = jdata.v();
+      // v[i] = Xup[i] * v[parent[i]] + vJ
       if (parent > 0)
         data.v[i] += data.liMi[i].actInv(data.v[parent]);
 
+      // crm(v{i}) * vJ == v[i] ^ jdata.v()
       data.a_gf[i] = jdata.c() + (data.v[i] ^ jdata.v());
+      // S{i} * qdd{i}
       data.a_gf[i] += jdata.S() * jmodel.jointVelocitySelector(a);
+      // Xup[i] * a[parent[i]]
       data.a_gf[i] += data.liMi[i].actInv(data.a_gf[parent]);
     }
   };
@@ -407,10 +412,12 @@ namespace pinocchio
       const JointIndex i = jmodel.id();
       const JointIndex parent = model.parents[i];
 
+      // Y(jj,param_inds) = S{j}' * Fi;
       data.jointTorqueRegressor.block(
         jmodel.idx_v(), 10 * (Eigen::DenseIndex(col_idx) - 1), jmodel.nv(), 10) =
         jdata.S().transpose() * data.bodyRegressor;
 
+      // Fi = Xup{j}' * Fi;
       if (parent > 0)
         forceSet::se3Action(data.liMi[i], data.bodyRegressor, data.bodyRegressor);
     }
@@ -548,6 +555,158 @@ namespace pinocchio
 
     return data.potentialEnergyRegressor;
   }
+
+  template<
+    typename Scalar,
+    int Options,
+    template<typename, int>
+    class JointCollectionTpl,
+    typename ConfigVectorType,
+    typename TangentVectorType>
+  std::pair<
+    typename DataTpl<Scalar, Options, JointCollectionTpl>::MatrixXs,
+    typename DataTpl<Scalar, Options, JointCollectionTpl>::MatrixXs>
+  computeIndirectRegressors(
+    const ModelTpl<Scalar, Options, JointCollectionTpl> & model,
+    DataTpl<Scalar, Options, JointCollectionTpl> & data,
+    const Eigen::MatrixBase<ConfigVectorType> & q,
+    const Eigen::MatrixBase<TangentVectorType> & v)
+  {
+    typedef context::Data::Matrix6x Matrix6x;
+    typedef context::Data::MatrixXs MatrixXs;
+    typedef pinocchio::context::BodyRegressorType BodyRegressorType;
+
+    MatrixXs CTregressor = MatrixXs::Zero(model.nv, 10 * (model.njoints - 1));
+    MatrixXs Hregressor = MatrixXs::Zero(model.nv, 10 * (model.njoints - 1));
+    for (JointIndex joint_id = 1; joint_id < (JointIndex)model.njoints; ++joint_id)
+    {
+      const JointIndex parent_id = model.parents[joint_id];
+      auto jmodel = model.joints[joint_id];
+      auto jdata = data.joints[joint_id];
+      auto i = joint_id;
+
+      // update joint model
+      jmodel.calc(jdata.derived(), q.derived(), v.derived());
+      // Xup{i} = XJ * model.Xtree{i};
+      data.liMi[i] = model.jointPlacements[i] * jdata.M();
+
+      data.v[i] = jdata.v(); // vJ = S{i} * qd{i};
+      // if parent>0 then v{i} = Xup{i} * v{parent} + vJ
+      if (parent_id > 0)
+        data.v[i] += data.liMi[i].actInv(data.v[parent_id]);
+
+      auto Sd = data.v[i].cross(jdata.S());
+      // compute regressor
+      // hi = individualRegressor(v[i], v[i] * 0);
+      // in Wensing's implementation the order is (a, v);
+      BodyRegressorType hi = bodyRegressor(data.v[i] * 0, data.v[i]);
+
+      // reverse substitution
+      auto j = i;
+      while (j > 0)
+      {
+        auto jdataj = data.joints[j];
+        auto jmodelj = model.joints[j];
+
+        auto Sj = jdataj.S();
+        auto Sdj = data.v[j].cross(Sj);
+
+        // Y_Hqd(jj, param_inds) = S{j}' * hi;
+        Hregressor.block(model.joints[j].idx_v(), (i - 1) * 10, model.joints[j].nv(), 10) =
+          Sj.transpose() * hi;
+        // Y_CTqd(jj, param_inds) = Sd{j}' * hi;
+        CTregressor.block(model.joints[j].idx_v(), (i - 1) * 10, model.joints[j].nv(), 10) =
+          Sdj.transpose() * hi;
+
+        // hi = Xup[i]' * hi
+        forceSet::se3Action(data.liMi[j], hi, hi);
+      
+        // j = model.parent(j);
+        j = model.parents[j];
+      }
+    }
+
+    return std::make_pair(Hregressor, CTregressor);
+  }
+
+  template<
+    typename Scalar,
+    int Options,
+    template<typename, int>
+    class JointCollectionTpl,
+    typename ConfigVectorType,
+    typename TangentVectorType>
+  std::pair<
+    typename DataTpl<Scalar, Options, JointCollectionTpl>::MatrixXs,
+    typename DataTpl<Scalar, Options, JointCollectionTpl>::MatrixXs>
+  computeMomentumRegressor(
+    const ModelTpl<Scalar, Options, JointCollectionTpl> & model,
+    DataTpl<Scalar, Options, JointCollectionTpl> & data,
+    const Eigen::MatrixBase<ConfigVectorType> & q,
+    const Eigen::MatrixBase<TangentVectorType> & v)
+  {
+    typedef context::Data::Matrix6x Matrix6x;
+    typedef context::Data::MatrixXs MatrixXs;
+
+    // symbolic jacobian of the spatial kinetic energy
+    auto spatialKineticEnergyJacobian =
+      [](const Eigen::Vector3d & v, const Eigen::Vector3d & w) -> Eigen::Matrix<double, 6, 10> {
+      Eigen::Matrix<double, 10, 6> jacobian;
+      jacobian << v[0], v[1], v[2], 0, 0, 0, \
+                  0, w[2], -w[1], 0, -v[2], v[1], \
+                  -w[2], 0, w[0], v[2], 0, -v[0], \
+                  w[1], -w[0], 0, -v[1], v[0], 0, \
+                  0, 0, 0, w[0], 0, 0, \
+                  0, 0, 0, w[1], w[0], 0, \
+                  0, 0, 0, 0, w[1], 0, \
+                  0, 0, 0, w[2], 0, w[0], \
+                  0, 0, 0, 0, w[2], w[1], \
+                  0, 0, 0, 0, 0, w[2];
+
+      return jacobian.transpose();
+    };
+
+    // zero the regressors
+    data.momentumRegressor.setZero();
+    data.dpartial_lagrangian_q.setZero();
+
+    auto zero_v = Eigen::Matrix<Scalar, Eigen::Dynamic, 1>::Zero(model.nv);
+
+    // first compute the momentum regressor with gravity terms included
+    computeJointTorqueRegressor(model, data, q, zero_v, v);
+    MatrixXs momentum_with_gravity = data.jointTorqueRegressor.eval();
+
+    // compute the gravity component of the regressor
+    computeJointTorqueRegressor(model, data, q, zero_v, zero_v);
+    MatrixXs gravity_regressor = data.jointTorqueRegressor.eval();
+
+    data.momentumRegressor = momentum_with_gravity - gravity_regressor;
+    forwardKinematics(model, data, q, v);
+    computeForwardKinematicsDerivatives(model, data, q, v, zero_v);
+
+    for (JointIndex joint_id = 1; joint_id < (JointIndex)model.njoints; ++joint_id)
+    {
+
+      Motion v_i = getVelocity(model, data, joint_id, LOCAL);
+
+      Matrix6x partial_dq(Matrix6x::Zero(6, model.nv));
+      Matrix6x dvb_dv(Matrix6x::Zero(6, model.nv));
+
+      getJointVelocityDerivatives(model, data, joint_id, LOCAL, partial_dq, dvb_dv);
+
+      // auto dvb_dv = velocity_derivatives.second;
+      auto phik_dv = spatialKineticEnergyJacobian(v_i.linear(), v_i.angular());
+
+      auto phik_dv_joint = dvb_dv.transpose() * phik_dv;
+      data.dpartial_lagrangian_q.middleCols((joint_id - 1) * 10, 10) = phik_dv_joint;
+    }
+
+    // Subtract the static regressor to get the final result
+    data.dpartial_lagrangian_q -= gravity_regressor;
+
+    return std::make_pair(data.momentumRegressor.eval(), data.dpartial_lagrangian_q.eval());
+  }
+
 } // namespace pinocchio
 
 #endif // ifndef __pinocchio_algorithm_regressor_hxx__
