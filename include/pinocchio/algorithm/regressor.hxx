@@ -223,10 +223,19 @@ namespace pinocchio
       typedef typename Vector3Like::Scalar Scalar;
       OutputType & res = PINOCCHIO_EIGEN_CONST_CAST(OutputType, out);
 
-      res << Scalar(0), -v[2] * v[0], -v[2] * v[1], v[1] * v[0], v[1] * v[1] - v[2] * v[2],
-        v[2] * v[1], v[2] * v[0], v[2] * v[1], Scalar(0), v[2] * v[2] - v[0] * v[0], -v[1] * v[0],
-        -v[2] * v[0], -v[1] * v[0], v[0] * v[0] - v[1] * v[1], v[1] * v[0], -v[2] * v[1],
-        v[2] * v[0], Scalar(0);
+      const Scalar v00 = v[0] * v[0];
+      const Scalar v11 = v[1] * v[1];
+      const Scalar v22 = v[2] * v[2];
+      const Scalar v01 = v[0] * v[1];
+      const Scalar v02 = v[0] * v[2];
+      const Scalar v12 = v[1] * v[2];
+
+      res <<  Scalar(0), -v02,       -v12, 
+              v01,        v11 - v22,  v12, 
+              v02,        v12,        Scalar(0), 
+              v22 - v00, -v01,       -v02, 
+             -v01,        v00 - v11,  v01, 
+             -v12,        v02,        Scalar(0);
     }
   } // namespace details
 
