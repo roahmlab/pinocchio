@@ -68,7 +68,7 @@ OPTION(BUILD_ADVANCED_TESTING "Build the advanced tests (multiprecision, etc.) o
 # --- OPTIONAL DEPENDENCIES -------------------------
 OPTION(BUILD_WITH_URDF_SUPPORT "Build the library with the URDF format support" ON)
 OPTION(BUILD_WITH_COLLISION_SUPPORT "Build the library with the collision support (required HPP-FCL)" OFF)
-OPTION(BUILD_WITH_AUTODIFF_SUPPORT "Build the library with the automatic differentiation support (via CppAD)" ON)
+OPTION(BUILD_WITH_AUTODIFF_SUPPORT "Build the library with the automatic differentiation support (via CppAD)" OFF)
 OPTION(BUILD_WITH_CASADI_SUPPORT "Build the library with the support of CASADI" OFF)
 OPTION(BUILD_WITH_CODEGEN_SUPPORT "Build the library with the support of code generation (via CppADCodeGen)" OFF)
 OPTION(BUILD_WITH_OPENMP_SUPPORT "Build the library with the OpenMP support" OFF)
@@ -292,7 +292,7 @@ ADD_SUBDIRECTORY(utils)
 #ADD_SUBDIRECTORY(examples)
 
 # --- BENCHMARKS ---------------------------------------------------------------
-#ADD_SUBDIRECTORY(benchmark)
+ADD_SUBDIRECTORY(benchmark)
 
 # --- PACKAGING ----------------------------------------------------------------
 MACRO(EXPORT_VARIABLE var_name var_value)
