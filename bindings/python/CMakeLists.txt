@@ -6,6 +6,7 @@
 # include(${JRL_CMAKE_MODULES}/python-helpers.cmake)
 
 # --- PYTHON TARGET --- #
+include(${JRL_CMAKE_MODULES}/python-helpers.cmake)
 SET(PYWRAP ${PROJECT_NAME}_pywrap)
 SET(PYWRAP ${PYWRAP} PARENT_SCOPE)
 
