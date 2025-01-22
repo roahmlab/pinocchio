@@ -140,9 +140,6 @@ struct ComputeSpatialForceSecondOrderDerivativesBackwardStep
     const JointIndex i_idx = jmodel.idx_v();
     JointIndex j_idx, k_idx;
     const JointIndex parent = model.parents[i];
-    // std::cout << "------------------------------------" << std::endl;
-    // std::cout << "i = " << i << std::endl;
-    // std::cout << "i_idx = " << i_idx << std::endl;
 
     const Inertia &oYcrb = data.oYcrb[i];  // IC{i}
     const Matrix6 &oBcrb = data.doYcrb[i]; // BC{i}
@@ -176,8 +173,12 @@ struct ComputeSpatialForceSecondOrderDerivativesBackwardStep
 
     Vector6c s1, s2, s4, s5, s6, s7, s8, s9, s10, s11, s12 ;
     Matrix6  s3, s13;
-    Force f_tmp, f_tmp2, f_tmp3, f_tmp4;
-  
+    Force f_tmp, ftmp1, f_tmp2, f_tmp3, f_tmp4;
+
+    auto get_f_vec  = [&data, &ftmp1](JointIndex idx){
+        return data.oMi[idx].actInv(ftmp1).toVector();
+    };
+
     ForceCrossMatrix(data.of[i], fic_cross); // cmf_bar(f{i}) 
 
     for (int p = 0; p < model.nvs[i]; p++) {
@@ -306,7 +307,7 @@ struct ComputeSpatialForceSecondOrderDerivativesBackwardStep
               const MotionRef<typename Data::Matrix6x::ColXpr> psid_dk = data.psid.col(kr);   // psi_dot{k}(:,r)
               const MotionRef<typename Data::Matrix6x::ColXpr> psidd_dk = data.psidd.col(kr); // psi_ddot{k}(:,r)
               const MotionRef<typename Data::Matrix6x::ColXpr> phid_dk = data.dJ.col(kr);     // phi_dot{k}(:,r)
-              const ActionMatrixType crfSk = S_k.toDualActionMatrix();                             //(S{i}(:,p) )x matrix
+              const ActionMatrixType crfSk = S_k.toDualActionMatrix();                             //(S{i}(:,p) )x* matrix
               const ActionMatrixType crmpsidk = psid_dk.toActionMatrix();
           
               Bic_psikt_dot = oYcrb.variation(psid_dk);       // psi_dot{k}(:,q) x* IC{i} - IC{i} psi_dot{k}(:,q) x
@@ -315,60 +316,73 @@ struct ComputeSpatialForceSecondOrderDerivativesBackwardStep
               // k <= j <= i
 
               // expr-1 SO-q
-              tmp_vec = s3*psid_dk.toVector() + ICi_St*psidd_dk.toVector() + crfSk * s2;
-              slice_in_v6(d2fc_dqdq_.at(i_idx), tmp_vec ,  jq, kr); // d2fc_dqdq_(i)(1:6, jq, kr) 
+              Vector6c FO_q_j = oYcrb.matrix() * psidd_dj.toVector() + fic_cross * S_j.toVector() + oBcrb * psid_dj.toVector();
+              Vector6c FO_q_k = oYcrb.matrix() * psidd_dk.toVector() + fic_cross * S_k.toVector() + oBcrb * psid_dk.toVector();
+
+              tmp_vec = s3*psid_dk.toVector() + ICi_St*psidd_dk.toVector() + crfSk * s2 - 
+                          crfSt * FO_q_k - crfSk * FO_q_j + crfSt * crfSk * data.of[i].toVector();
+              ftmp1.toVector() = tmp_vec;
+              slice_in_v6(d2fc_dqdq_.at(i_idx), data.oMi[i].actInv(ftmp1).toVector() ,  jq, kr); // d2fc_dqdq_(i)(1:6, jq, kr) 
 
               //  expr-1 SO-aq
               //  d2fc_daq{i}(:, jj(t), kk(r)) = crfSr * s4;
-              tmp_vec.noalias() = crfSk * s4;
-              slice_in_v6(d2fc_dadq_.at(i_idx), tmp_vec,  jq, kr); // d2fc_dadq_(i)(1:6, jq, kr)
+              tmp_vec.noalias() = crfSk * s4 - crfSk * oYcrb.matrix() * S_j.toVector();
+              ftmp1.toVector() = tmp_vec;
+              slice_in_v6(d2fc_dadq_.at(i_idx), data.oMi[i].actInv(ftmp1).toVector(),  jq, kr); // d2fc_dadq_(i)(1:6, jq, kr)
 
               // expr-1 SO-vq
               //d2fc_dvq{i}(:, jj(t), kk(r)) =(Bic_psikr_dot + crfSr*BCi + 2*ICi*crmPsidr)*S_t + crfSr*s5;
               r1 = Bic_psikt_dot + crfSk * oBcrb  +  2.0 * oYcrb.matrix() * crmpsidk;
-              tmp_vec.noalias() = r1 * Sj_vec+  crfSk * s5;
-
-              slice_in_v6(d2fc_dvdq_.at(i_idx), tmp_vec,  jq, kr); // d2fc_dvdq_(i)(1:6, jq, kr)
+              tmp_vec.noalias() = r1 * Sj_vec+  crfSk * s5 - crfSk * (oYcrb.matrix() * (psid_dj + phid_dj).toVector() + oBcrb * Sj_vec);
+              ftmp1.toVector() = tmp_vec;
+              slice_in_v6(d2fc_dvdq_.at(i_idx), data.oMi[i].actInv(ftmp1).toVector(),  jq, kr); // d2fc_dvdq_(i)(1:6, jq, kr)
 
               if (j != i) { // k <= j < i
 
                 //  expr-5 SO-q 
-                tmp_vec = ICi_Sp * psidd_dk.toVector() + u4 * S_k.toVector() + u3 * psid_dk.toVector();
-                slice_in_v6(d2fc_dqdq_.at(j_idx), tmp_vec,  kr, ip); // d2fc_dqdq_(j)(1:6, kr, ip)
+                tmp_vec = ICi_Sp * psidd_dk.toVector() + u4 * S_k.toVector() + u3 * psid_dk.toVector()-
+                          crfSk * (oYcrb.matrix() * psidd_dm.toVector() + fic_cross * S_i.toVector() + oBcrb * psid_dm.toVector());
+                ftmp1.toVector() = tmp_vec;
+                slice_in_v6(d2fc_dqdq_.at(j_idx), data.oMi[j].actInv(ftmp1).toVector(),  kr, ip); // d2fc_dqdq_(j)(1:6, kr, ip)
               
 
                 // expr-6 SO-q
-                slice_in_v6(d2fc_dqdq_.at(j_idx), tmp_vec,  ip, kr); // d2fc_dqdq_(j)(1:6, ip, kr) 
+                slice_in_v6(d2fc_dqdq_.at(j_idx), data.oMi[j].actInv(ftmp1).toVector(),  ip, kr); // d2fc_dqdq_(j)(1:6, ip, kr) 
 
                 // expr-7 SO-v
                 // d2fc_dv{j}(:, kk(r), ii(p)) = Bic_phii*S_r;      
                 tmp_vec.noalias() = Bicphii * S_k.toVector(); 
-                slice_in_v6(d2fc_dvdv_.at(j_idx), tmp_vec,  kr, ip); // d2fc_dvdv_(j)(1:6, kr, ip) 
+                ftmp1.toVector() = tmp_vec; 
+                slice_in_v6(d2fc_dvdv_.at(j_idx), data.oMi[j].actInv(ftmp1).toVector(),  kr, ip); // d2fc_dvdv_(j)(1:6, kr, ip) 
 
                 //  expr-8 SO-v
                 //  d2fc_dv{j}(:, ii(p), kk(r)) = d2fc_dv{j}(:, kk(r), ii(p)); 
-                slice_in_v6(d2fc_dvdv_.at(j_idx), tmp_vec,  ip, kr); // d2fc_dvdv_(j)(1:6, ip, kr)
+                slice_in_v6(d2fc_dvdv_.at(j_idx), data.oMi[j].actInv(ftmp1).toVector(),  ip, kr); // d2fc_dvdv_(j)(1:6, ip, kr)
 
                 // % expr-2 SO-aq
                 // d2fc_daq{j}(:, ii(p), kk(r)) = crfSr * u2;
-                tmp_vec.noalias() = crfSk * u2;
-                slice_in_v6(d2fc_dadq_.at(j_idx), tmp_vec,  ip, kr); // d2fc_dadq_(j)(1:6, ip, kr)
+                tmp_vec.noalias() = crfSk * u2 - crfSk * oYcrb.matrix() * S_i.toVector();
+                ftmp1.toVector() = tmp_vec;
+                slice_in_v6(d2fc_dadq_.at(j_idx), data.oMi[j].actInv(ftmp1).toVector(),  ip, kr); // d2fc_dadq_(j)(1:6, ip, kr)
 
                 //  expr-5 SO-aq
                 // d2fc_daq{j}(:, kk(r), ii(p)) = ICi_Sp * S_r;
                 tmp_vec.noalias() = ICi_Sp * S_k.toVector();
-                slice_in_v6(d2fc_dadq_.at(j_idx), tmp_vec,  kr, ip); // d2fc_dadq_(j)(1:6, kr, ip)
+                ftmp1.toVector() = tmp_vec;
+                slice_in_v6(d2fc_dadq_.at(j_idx), data.oMi[j].actInv(ftmp1).toVector(),  kr, ip); // d2fc_dadq_(j)(1:6, kr, ip)
 
                 //  expr-2 SO-vq
                 // d2fc_dvq{j}(:, ii(p), kk(r)) = (Bic_psikr_dot + crfSr*BCi + 2*ICi*crmPsidr)*S_p  + crfSr*u1;
-                tmp_vec.noalias() = r1 * Si_vec + crfSk * u1;
-                slice_in_v6(d2fc_dvdq_.at(j_idx), tmp_vec,  ip, kr); // d2fc_dvdq_(j)(1:6, ip, kr)
+                tmp_vec.noalias() = r1 * Si_vec + crfSk * u1 - 
+                                    crfSk * (oYcrb.matrix() * (psid_dm + phid_dm).toVector() + oBcrb * S_i.toVector());
+                ftmp1.toVector() = tmp_vec;
+                slice_in_v6(d2fc_dvdq_.at(j_idx), data.oMi[j].actInv(ftmp1).toVector(),  ip, kr); // d2fc_dvdq_(j)(1:6, ip, kr)
     
                 //  expr-5 SO-vq
                 //   d2fc_dvq{j}(:, kk(r), ii(p)) = u3*S_r  + ICi_Sp*(psid_r + Sd_r);
                 tmp_vec.noalias() = u3 * S_k.toVector() + ICi_Sp * (psid_dk + phid_dk).toVector();
-                slice_in_v6(d2fc_dvdq_.at(j_idx), tmp_vec,  kr, ip); // d2fc_dvdq_(j)(1:6, kr, ip)
-
+                ftmp1.toVector() = tmp_vec;
+                slice_in_v6(d2fc_dvdq_.at(j_idx), data.oMi[j].actInv(ftmp1).toVector(),  kr, ip); // d2fc_dvdq_(j)(1:6, kr, ip)
               }
 
               if (k != j) { // k < j <= i
@@ -380,35 +394,42 @@ struct ComputeSpatialForceSecondOrderDerivativesBackwardStep
   
                 // expr-3 SO-q
                 // d2fc_dq{k}(:, ii(p), jj(t))
-                slice_in_v6(d2fc_dqdq_.at(k_idx), s6 ,  ip, jq); // d2fc_dqdq_(k)(1:6, ip, jq)
+                ftmp1.toVector() = s6;
+                slice_in_v6(d2fc_dqdq_.at(k_idx), data.oMi[k].actInv(ftmp1).toVector() ,  ip, jq); // d2fc_dqdq_(k)(1:6, ip, jq)
            
 
                 // % expr-1 SO-v
                 // d2fc_dv{i}(:, jj(t), kk(r)) = Bic_phij*S_r;
                 tmp_vec.noalias() = Bic_phij * S_k.toVector();
-                slice_in_v6(d2fc_dvdv_.at(i_idx), tmp_vec,  jq, kr); // d2fc_dvdv_(i)(1:6, jq, kr)
+                ftmp1.toVector() = tmp_vec; 
+                slice_in_v6(d2fc_dvdv_.at(i_idx), data.oMi[i].actInv(ftmp1).toVector(), jq, kr); // d2fc_dvdv_(i)(1:6, jq, kr)
 
                 // % expr-2 SO-v
                 // d2fc_dv{i}(:, kk(r), jj(t)) = d2fc_dv{i}(:, jj(t), kk(r));
-                slice_in_v6(d2fc_dvdv_.at(i_idx), tmp_vec,  kr, jq); // d2fc_dvdv_(i)(1:6, kr, jq)
+                slice_in_v6(d2fc_dvdv_.at(i_idx), data.oMi[i].actInv(ftmp1).toVector(), kr, jq); // d2fc_dvdv_(i)(1:6, kr, jq)
 
                 // expr-3 SO-aq 
                 // d2fc_daq{i}(:, kk(r), jj(t)) = ICi_St * S_r;
-                tmp_vec.noalias() = ICi_St * S_k.toVector();
-                slice_in_v6(d2fc_dadq_.at(i_idx), tmp_vec,  kr, jq); // d2fc_dadq_(i)(1:6, kr, jq)
+                tmp_vec.noalias() = ICi_St * S_k.toVector() - crfSt * oYcrb.matrix() * S_k.toVector();
+                ftmp1.toVector() = tmp_vec;
+                slice_in_v6(d2fc_dadq_.at(i_idx), data.oMi[i].actInv(ftmp1).toVector(),  kr, jq); // d2fc_dadq_(i)(1:6, kr, jq)
 
                 // % expr-4 SO-aq
                 // d2fc_daq{k}(:, ii(p), jj(t)) = s8;
-                slice_in_v6(d2fc_dadq_.at(k_idx), s8,  ip, jq); // d2fc_dadq_(k)(1:6, ip, jq)
+                ftmp1.toVector() = s8;
+                slice_in_v6(d2fc_dadq_.at(k_idx), data.oMi[k].actInv(ftmp1).toVector(),  ip, jq); // d2fc_dadq_(k)(1:6, ip, jq)
 
                 // expr-3 SO-vq
                 //   d2fc_dvq{i}(:, kk(r), jj(t)) =  s3*S_r  + ICi_St*(psid_r + Sd_r);
-                tmp_vec.noalias() = s3 * S_k.toVector() + ICi_St * (psid_dk + phid_dk).toVector();
-                slice_in_v6(d2fc_dvdq_.at(i_idx), tmp_vec,  kr, jq); // d2fc_dvdq_(i)(1:6, kr, jq)
+                tmp_vec.noalias() = s3 * S_k.toVector() + ICi_St * (psid_dk + phid_dk).toVector() - 
+                                    crfSt * (oYcrb.matrix() * (psid_dk + phid_dk).toVector() + oBcrb * S_k.toVector());
+                ftmp1.toVector() = tmp_vec;
+                slice_in_v6(d2fc_dvdq_.at(i_idx), data.oMi[i].actInv(ftmp1).toVector(),  kr, jq); // d2fc_dvdq_(i)(1:6, kr, jq)
 
                 // expr-4 SO-vq
                 //  d2fc_dvq{k}(:, ii(p), jj(t)) = s10;
-                slice_in_v6(d2fc_dvdq_.at(k_idx), s10,  ip, jq); // d2fc_dvdq_(k)(1:6, ip, jq)
+                ftmp1.toVector() = s10;
+                slice_in_v6(d2fc_dvdq_.at(k_idx), data.oMi[k].actInv(ftmp1).toVector(),  ip, jq); // d2fc_dvdq_(k)(1:6, ip, jq)
 
 
                 if (j != i) { // k < j < i
@@ -419,25 +440,29 @@ struct ComputeSpatialForceSecondOrderDerivativesBackwardStep
 
                   // % expr-4 SO-v
                   // d2fc_dv{k}(:, ii(p), jj(t)) = s7;
-                  slice_in_v6(d2fc_dvdv_.at(k_idx), s7,  ip, jq); // d2fc_dvdv_(k)(1:6, ip, jq)
+                  ftmp1.toVector() = s7;   
+                  slice_in_v6(d2fc_dvdv_.at(k_idx), data.oMi[k].actInv(ftmp1).toVector(),  ip, jq); // d2fc_dvdv_(k)(1:6, ip, jq)
 
                   // % expr-5 SO-v
                   // d2fc_dv{k}(:, jj(t), ii(p)) = d2fc_dv{k}(:, ii(p), jj(t));
-                  slice_in_v6(d2fc_dvdv_.at(k_idx), s7,  jq, ip); // d2fc_dvdv_(k)(1:6, jq, ip)
+                  slice_in_v6(d2fc_dvdv_.at(k_idx), data.oMi[k].actInv(ftmp1).toVector(),  jq, ip); // d2fc_dvdv_(k)(1:6, jq, ip)
 
 
                   // % expr-6 SO-aq
                   // d2fc_daq{k}(:, jj(t), ii(p)) = s9;
-                  slice_in_v6(d2fc_dadq_.at(k_idx), s9,  jq, ip); // d2fc_dadq_(k)(1:6, jq, ip)
+                  ftmp1.toVector() = s9;
+                  slice_in_v6(d2fc_dadq_.at(k_idx), data.oMi[k].actInv(ftmp1).toVector(),  jq, ip); // d2fc_dadq_(k)(1:6, jq, ip)
 
                   //  expr-6 SO-vq
                   //   d2fc_dvq{k}(:, jj(t), ii(p)) =  s11;
-                  slice_in_v6(d2fc_dvdq_.at(k_idx), s11,  jq, ip); // d2fc_dvdq_(k)(1:6, jq, ip)
+                  ftmp1.toVector() = s11;
+                  slice_in_v6(d2fc_dvdq_.at(k_idx), data.oMi[k].actInv(ftmp1).toVector(),  jq, ip); // d2fc_dvdq_(k)(1:6, jq, ip)
 
                 } else { // k < j = i
                   // expr-6 SO-v 
                   // d2fc_dv{k}(:, ii(p), jj(t)) = s12;
-                  slice_in_v6(d2fc_dvdv_.at(k_idx), s12,  ip, jq); // d2fc_dvdv_(k)(1:6, ip, jq)
+                  ftmp1.toVector() = s12;   
+                  slice_in_v6(d2fc_dvdv_.at(k_idx), data.oMi[k].actInv(ftmp1).toVector(),  ip, jq); // d2fc_dvdv_(k)(1:6, ip, jq)
 
                 }
 
@@ -445,7 +470,8 @@ struct ComputeSpatialForceSecondOrderDerivativesBackwardStep
                 // expr-3 SO-v 
                 // d2fc_dv{i}(:, jj(t), kk(r)) = s13 * S_r;
                 tmp_vec.noalias() = s13 * S_k.toVector();
-                slice_in_v6(d2fc_dvdv_.at(i_idx), tmp_vec,  jq, kr); // d2fc_dvdv_(i)(1:6, jq, kr)
+                ftmp1.toVector() = tmp_vec;   
+                slice_in_v6(d2fc_dvdv_.at(i_idx), data.oMi[i].actInv(ftmp1).toVector(),  jq, kr); // d2fc_dvdv_(i)(1:6, jq, kr)
 
               }
               
